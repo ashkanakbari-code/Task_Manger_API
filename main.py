@@ -1,5 +1,6 @@
 import json
-
+import logging
+import redis
 
 from typing import Annotated
 from fastapi import FastAPI, Depends, HTTPException, Path,status
@@ -10,6 +11,7 @@ import schemas
 from database import engine, get_db
 from redis_client import redis_client
 
+logger = logging.getLogger(__name__)
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Task Manager API")
@@ -20,8 +22,25 @@ def tasks_cache_key(done: bool | None) -> str:
     if done is None:
         return "tasks:all"
     return f"tasks:done:{str(done).lower()}"
+
+def cache_get(key: str) -> str | None:
+    try:
+        return redis_client.get(key)
+    except redis.RedisError:
+        logger.warning("Redis unavailable, falling back to the database")
+        return None
+
+def cache_set(key: str, value: str) -> None:
+    try:
+        redis_client.set(key, value, ex=CACHE_TTL)
+    except redis.RedisError:
+        logger.warning("Redis unavailable, result was not cached")
+
 def invalidate_tasks_cache() -> None:
-    redis_client.delete("tasks:all", "tasks:done:ture", "tasks:done:false")
+    try:
+        redis_client.delete("tasks:all", "tasks:done:ture", "tasks:done:false")
+    except redis.RedisError:
+        logger.warning("Redis unavailable, cache was not invalidated")
 
 def get_task_or_404(db: Session, task_id: int) -> models.Task:
     task = db.get(models.Task, task_id)
@@ -42,7 +61,7 @@ def create_task(data: schemas.TaskCreate, db: Session = Depends(get_db)):
 def list_task(done: bool | None = None, db: Session = Depends(get_db)):
     key = tasks_cache_key(done)
 
-    cached = redis_client.get(key)
+    cached = cache_get(key)
     if cached is not None:
         return json.loads(cached)
     
@@ -52,7 +71,7 @@ def list_task(done: bool | None = None, db: Session = Depends(get_db)):
     tasks = query.all()
 
     result = [schemas.TaskOut.model_validate(t).model_dump() for t in tasks]
-    redis_client.set(key, json.dumps(result), ex=CACHE_TTL)
+    cache_set(key, json.dumps(result))
     return result
 
 @app.get("/tasks/{task_id}", response_model=schemas.TaskOut)
