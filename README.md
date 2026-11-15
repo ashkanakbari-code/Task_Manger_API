@@ -1,8 +1,8 @@
 # Task Manager API
 
-A REST API for managing tasks, built with **FastAPI**, **SQLAlchemy**, and **SQLite**. Tasks are stored in a real database, so they persist between server restarts.
+A REST API for managing tasks, built with **FastAPI**, **SQLAlchemy**, and **SQLite**, with **Redis** caching for fast reads. Tasks are stored in a real database, so they persist between server restarts.
 
-I built this as a practice project to learn backend development: database models, request validation, dependency injection, and proper HTTP status codes.
+I built this as a practice project to learn backend development: database models, request validation, dependency injection, proper HTTP status codes, and caching.
 
 ## Features
 
@@ -11,6 +11,7 @@ I built this as a practice project to learn backend development: database models
 - Partial updates: change only the fields you send
 - Request validation with Pydantic (for example, a task title can't be empty)
 - Correct HTTP status codes: `201` on create, `204` on delete, `404` for missing tasks, `422` for invalid data
+- **Redis caching** of the task list with automatic invalidation on every change
 - Interactive API documentation, generated automatically
 
 ## Tech Stack
@@ -19,16 +20,18 @@ I built this as a practice project to learn backend development: database models
 - [SQLAlchemy 2.x](https://www.sqlalchemy.org/): ORM for database access
 - [Pydantic](https://docs.pydantic.dev/): data validation and response schemas
 - [SQLite](https://www.sqlite.org/): database
+- [Redis](https://redis.io/): in-memory cache
 - [Uvicorn](https://www.uvicorn.org/): ASGI server
 
 ## Project Structure
 
 ```
 task_api/
-├── main.py          # FastAPI app and route definitions
-├── database.py      # Database engine, session factory, get_db dependency
-├── models.py        # SQLAlchemy table definitions
-├── schemas.py       # Pydantic models for requests and responses
+├── main.py            # FastAPI app and route definitions
+├── database.py        # Database engine, session factory, get_db dependency
+├── models.py          # SQLAlchemy table definitions
+├── schemas.py         # Pydantic models for requests and responses
+├── redis_client.py    # Redis connection
 ├── requirements.txt
 └── README.md
 ```
@@ -36,12 +39,40 @@ task_api/
 How the pieces fit together:
 
 ```
-Request → Pydantic schema (validation) → route → SQLAlchemy session → SQLite
-                                                        ↓
-Response ← Pydantic schema (output shape) ←──────────────┘
+Request → Pydantic schema (validation) → route → Redis cache (hit? return)
+                                                      ↓ miss
+                                          SQLAlchemy session → SQLite
+                                                      ↓
+Response ← Pydantic schema (output shape) ← result (also saved in Redis)
 ```
 
+## How Caching Works
+
+`GET /tasks` is cached in Redis for 60 seconds.
+
+1. The route builds a cache key from the filter: `tasks:all`, `tasks:done:true`, or `tasks:done:false`.
+2. If the key exists in Redis, the cached list is returned without touching the database.
+3. If not, the tasks are read from SQLite, saved in Redis with a 60-second time to live (TTL), and returned.
+4. Every create, update, or delete clears all three cache keys right after the database commit, so users never see stale data.
+
 ## Getting Started
+
+### Prerequisites
+
+- Python 3.10 or newer
+- A running Redis server (default: `localhost:6379`)
+
+Check that Redis is running:
+
+```bash
+redis-cli ping    # should print PONG
+```
+
+If it isn't running, start it (the service name may be `redis` or `valkey` depending on your Linux distribution):
+
+```bash
+sudo systemctl start redis
+```
 
 ### 1. Clone the repository
 
@@ -85,7 +116,7 @@ Go to [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) to try every endp
 | Method | Endpoint | Description | Success | Errors |
 |--------|----------|-------------|---------|--------|
 | `POST` | `/tasks` | Create a task | `201` | `422` |
-| `GET` | `/tasks` | List all tasks (optional `?done=true/false`) | `200` | |
+| `GET` | `/tasks` | List all tasks (optional `?done=true/false`), cached | `200` | |
 | `GET` | `/tasks/{task_id}` | Get one task | `200` | `404` |
 | `PUT` | `/tasks/{task_id}` | Update a task (only the fields you send) | `200` | `404`, `422` |
 | `DELETE` | `/tasks/{task_id}` | Delete a task | `204` | `404` |
@@ -140,3 +171,9 @@ curl "http://127.0.0.1:8000/tasks?done=true"
 curl -X DELETE http://127.0.0.1:8000/tasks/1
 ```
 
+**Inspect the cache**
+
+```bash
+redis-cli keys "tasks:*"
+redis-cli ttl tasks:all
+```
