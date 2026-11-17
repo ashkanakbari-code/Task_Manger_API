@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      DATABASE_URL: sqlite:////data/tasks.db
+    volumes:
+      - task_data:/data
+    depends_on:
+      - redis
+  redis:
+    image: redis:7-alpine
+volumes:
+  task_data:
